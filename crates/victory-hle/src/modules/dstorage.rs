@@ -1326,6 +1326,38 @@ mod tests {
         assert!(l.start().is_some());
     }
 
+    /// The inflated BCPack stream occupies staging even when compressed
+    /// input comes from memory; two intermediate buffers cannot bypass it.
+    #[test]
+    fn zlib_bcpack_intermediate_buffers_are_charged() {
+        for source in [0, MEMORY_SOURCE] {
+            let mut l = lanes(100);
+            l.lanes.insert(0, Lane::new(0, 64));
+            for _ in 0..2 {
+                let mut r = request(
+                    source | ZLIB | BCPACK,
+                    std::ptr::null_mut(),
+                    32,
+                    std::ptr::null(),
+                    0,
+                    16,
+                );
+                r.intermediate_size = 64;
+                l.lanes.get_mut(&0).unwrap().unsubmitted.push(Command::Read(r));
+            }
+            l.submit(0);
+            let first = l.start().unwrap();
+            let want = if source == 0 { 80 } else { 64 };
+            assert_eq!(first.staging, want);
+            assert!(l.start().is_none(), "two inflated buffers exceed staging");
+            l.finish(&first, Ok(()));
+            let second = l.start().unwrap();
+            assert_eq!(second.staging, want);
+            l.finish(&second, Ok(()));
+            assert_eq!(l.staged, 0);
+        }
+    }
+
     #[test]
     fn a_status_waits_for_every_earlier_read() {
         let mut l = lanes(STAGING);
