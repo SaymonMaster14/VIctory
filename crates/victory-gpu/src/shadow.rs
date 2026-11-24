@@ -521,3 +521,46 @@ pub(crate) fn near(va: u64) -> String {
     }
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Growth on both sides keeps already-taken bytes, reads the new
+    /// edges, and reuses a snapshot whose capacity already covers them.
+    #[test]
+    fn snapshot_growth_reuses_capacity_and_preserves_taken_bytes() {
+        let memory: Vec<u8> = (0..=255).collect();
+        let Some((buffer, data)) = host().and_then(|h| h.shared_buffer(256)) else {
+            return;
+        };
+        // SAFETY: our mapped buffer and synthetic source each hold 256 bytes.
+        unsafe { std::ptr::copy_nonoverlapping(memory.as_ptr(), data, memory.len()) };
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let base = memory.as_ptr() as usize;
+        let shadow = Shadow::new(buffer, data, gpu, base as u64, 256);
+        let mut taken = Vec::with_capacity(128);
+        taken.extend_from_slice(&memory[128..160]);
+        let allocation = taken.as_ptr();
+        let capacity = taken.capacity();
+        *shadow.before.lock().unwrap() = Some((128, taken));
+        // SAFETY: disjoint ranges inside our mapping. The middle changed
+        // after it was taken; only the newly covered edges should be read.
+        unsafe {
+            std::slice::from_raw_parts_mut(data.add(96), 32).fill(0xa5);
+            std::slice::from_raw_parts_mut(data.add(128), 32).fill(0xee);
+            std::slice::from_raw_parts_mut(data.add(160), 32).fill(0x5a);
+        }
+        shadow.writing(base + 96, 96);
+        let before = shadow.before.lock().unwrap();
+        let (start, bytes) = before.as_ref().unwrap();
+        assert_eq!(*start, 96);
+        assert_eq!(bytes.len(), 96);
+        assert_eq!(&bytes[..32], &[0xa5; 32]);
+        assert_eq!(&bytes[32..64], &memory[128..160]);
+        assert_eq!(&bytes[64..], &[0x5a; 32]);
+        assert_eq!(bytes.as_ptr(), allocation, "spare capacity must be reused");
+        assert_eq!(bytes.capacity(), capacity);
+    }
+}
